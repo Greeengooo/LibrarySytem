@@ -1,40 +1,51 @@
-from aifc import Error
-from sqlalchemy import create_engine
-from sqlalchemy import engine
+import sys
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtWidgets import QHeaderView
+from PyQt5.QtWidgets import QHeaderView, QMessageBox, QPushButton, QAbstractButton, QCalendarWidget, QWidget
 import pandas as pd
+from datetime import datetime
+
+from PyQt5.uic.properties import QtGui
+
+from database.db_connection import Database
 from reader.pandas_model import pandasModel
 
 
-class Search(object):
+class ReaderView(QWidget):
     connection = None
+    res_df = None
+    res_title = None
+    ticket_id = 1499
 
-    def load_data(self, age):
-        query = """SELECT ticket_id, initials FROM reader WHERE ticket_id IN (SELECT ticket_id FROM reader WHERE 
-        TIMESTAMPDIFF(YEAR, birth_date, CURDATE()) = %s AND ticket_id IN (SELECT ticket_id FROM copy WHERE isbn IN (
-        SELECT isbn FROM book WHERE year_publication = 2008 AND isbn IN (SELECT isbn FROM book_authors WHERE 
-        author_surname = "Антоненко")) AND (YEAR(issue_date) = 2020 AND MONTH(issue_date) = 10) AND (YEAR(
-        return_date) = 2021 AND MONTH(return_date) = 4))); """ % age
-        df_res = pd.read_sql(query, self.connection)
-        p_model = pandasModel(df_res)
-        self.db_view.setModel(p_model)
+    def __init__(self):
+        super().__init__()
+        self.connection = Database.connect_to_db()
+        self.setupUi(self)
+        self.load_all_data()
 
     def load_all_data(self):
         query = """SELECT title, publisher, year_publication, authors.surname, authors.initials
                                   FROM (authors INNER JOIN book_authors ON authors.surname = book_authors.author_surname)
                                   INNER JOIN book ON book_authors.book_isbn = book.isbn
-                                  INNER JOIN catalog_book ON book.isbn = catalog_book.isbn """
+                                  INNER JOIN catalog_book ON book.isbn = catalog_book.isbn 
+                                  ORDER BY title"""
         df_res = pd.read_sql(query, self.connection)
-        p_model = pandasModel(df_res)
+        df_res.rename(columns={'title': 'Назва', 'publisher': 'Видавництво', 'year_publication': 'Рік видання', 'surname': 'Прізвище', 'initials': 'Ініціали'}, inplace=True)
+        self.res_df = df_res
+        p_model = pandasModel(self.res_df)
         self.db_view.setModel(p_model)
 
     def load_data_params(self, title='', author='', sphere=''):
+        if author == '*' and sphere == '*':
+            self.load_all_data()
+            return
+
         query = """SELECT title, publisher, year_publication, authors.surname, authors.initials
                                   FROM (authors INNER JOIN book_authors ON authors.surname = book_authors.author_surname)
                                   INNER JOIN book ON book_authors.book_isbn = book.isbn
                                   INNER JOIN catalog_book ON book.isbn = catalog_book.isbn
-                                  WHERE"""
+                                  WHERE
+                                  """
+
         if title != '':
             query += """ book.title = '%s'""" % title
             if author != '*':
@@ -50,18 +61,10 @@ class Search(object):
                                            FROM catalog
                                            WHERE sphere_name = '%s');""" % sphere
         df_res = pd.read_sql(query, self.connection)
-        p_model = pandasModel(df_res)
+        df_res.rename(columns={'title': 'Назва', 'publisher': 'Видавництво', 'year_publication': 'Рік видання', 'surname': 'Прізвище', 'initials': 'Ініціали'}, inplace=True)
+        self.res_df = df_res
+        p_model = pandasModel(self.res_df)
         self.db_view.setModel(p_model)
-
-    def connect_to_db(self):
-        try:
-            self.connection = create_engine(engine.url.URL.create(
-                drivername='mysql+pymysql',
-                username='root',
-                password='12345',
-                database='library', ))
-        except Error as err:
-            print(f"Error: '{err}'")
 
     def enter_clicked(self):
         title = str(self.lineEdit.text())
@@ -83,7 +86,62 @@ class Search(object):
         res = [lst_spheres[i][0] for i in range(0, len(lst_spheres))]
         return res
 
-    def init_ui(self, Form):
+    def check_copy(self, title):
+        query = """SELECT copy.inven_id
+                    FROM copy INNER JOIN book ON copy.isbn = book.isbn 
+                    WHERE book.title = '%s' AND NOT EXISTS 
+
+                    (SELECT inven_id 
+                    FROM reader_copy
+                    WHERE copy.inven_id = inven_id);""" % title
+        res = self.connection.connect().execute(query)
+        copies = [list(i) for i in res]
+        return [copies[i][0] for i in range(0, len(copies))]
+
+    def check_copy_return_date(self, title):
+        query = """SELECT copy.inven_id, reader_copy.expected_return_date 
+        FROM (reader_copy INNER JOIN copy ON reader_copy.inven_id = copy.inven_id) INNER JOIN book ON copy.isbn = book.isbn 
+        WHERE book.title = '%s' AND reader_copy.expected_return_date > CURDATE();""" % title
+        res = self.connection.connect().execute(query)
+        dates = [list(i) for i in res]
+        return [{dates[i][0]: dates[i][1].strftime('%Y-%m-%d')} for i in range(0, len(dates))]
+
+    def cell_left_click(self, item):
+        msg = QMessageBox()
+        msg.setWindowTitle('Наявність примірника книги')
+        self.res_title = self.res_df.iloc[item.row(), 0]
+        copies = self.check_copy(self.res_title)
+        msg_text = 'Назва: ' + self.res_title
+        if len(copies) != 0:
+            msg_text += '\nДоступні примірники: %s' % copies
+            msg.addButton(self.tr("Взяти книгу"), QMessageBox.ActionRole)
+            msg.buttonClicked.connect(self.select_date)
+        else:
+            msg_text += '\nНаявність: Немає доступних примірників'
+            dates_list = self.check_copy_return_date(self.res_title)
+            msg_text += '\n\nБудуть доступні:\n'
+            for i in range(len(dates_list)):
+                key, value = list(dates_list[i].items())[0]
+                dates_text = 'Номер: ' + str(key) + '  Дата: ' + str(value) + '\n'
+                msg_text += dates_text
+        msg.setText(msg_text)
+        msg.exec_()
+
+    def select_date(self):
+        self.dateSelector.setVisible(True)
+        self.setDateBtn.setVisible(True)
+
+    def take_book(self):
+        date_return = self.dateSelector.selectedDate().toPyDate()
+        today = datetime.today().strftime('%Y-%m-%d')
+        copy_inven_id = self.check_copy(self.res_title)[0]
+        query = """INSERT INTO reader_copy (ticket_id, inven_id, issue_date, expected_return_date) 
+        VALUES(%s, %s, '%s', '%s')""" % (self.ticket_id, copy_inven_id, today, date_return)
+        self.connection.connect().execute(query)
+        self.dateSelector.setVisible(False)
+        self.setDateBtn.setVisible(False)
+
+    def setupUi(self, Form):
         Form.setObjectName("Form")
         Form.resize(1300, 720)
         self.db_widget = QtWidgets.QWidget(Form)
@@ -99,6 +157,7 @@ class Search(object):
         self.db_view.horizontalHeader().setStretchLastSection(True)
         self.db_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.db_view.setObjectName("tableWidget")
+        self.db_view.clicked.connect(self.cell_left_click)
 
         self.verticalLayoutWidget = QtWidgets.QWidget(Form)
         self.verticalLayoutWidget.setGeometry(QtCore.QRect(9, 9, 371, 281))
@@ -152,27 +211,41 @@ class Search(object):
         self.pushButton.setObjectName("pushButton")
         self.pushButton.clicked.connect(self.enter_clicked)
 
+        self.dateSelector = QCalendarWidget(Form)
+        self.dateSelector.setGridVisible(True)
+        self.dateSelector.setFixedWidth(350)
+        self.dateSelector.move(20,420)
+        self.dateSelector.setVisible(False)
+
+        self.setDateBtn = QtWidgets.QPushButton(Form)
+        self.setDateBtn.setGeometry(QtCore.QRect(140, 340, 93, 28))
+        self.setDateBtn.setObjectName("setDateButton")
+        self.setDateBtn.clicked.connect(self.enter_clicked)
+        self.setDateBtn.setFixedWidth(250)
+        self.setDateBtn.move(60, 675)
+        self.setDateBtn.setVisible(False)
+        self.setDateBtn.clicked.connect(self.take_book)
+
         self.retranslate_ui(Form)
         QtCore.QMetaObject.connectSlotsByName(Form)
 
     def retranslate_ui(self, Form):
         _translate = QtCore.QCoreApplication.translate
         Form.setWindowTitle(_translate("Form", "Form"))
-        self.label_3.setText(_translate("Form", "Sphere"))
-        self.label.setText(_translate("Form", "Title"))
-        self.label_2.setText(_translate("Form", "Authors"))
-        self.pushButton.setText(_translate("Form", "Search"))
+        self.label_3.setText(_translate("Form", "Сфера"))
+        self.label.setText(_translate("Form", "Назва"))
+        self.label_2.setText(_translate("Form", "Автори"))
+        self.pushButton.setText(_translate("Form", "Пошук"))
+        self.setDateBtn.setText(_translate("Form", "Підтвердити дату повернення"))
 
 
 if __name__ == "__main__":
-    import sys
-
     app = QtWidgets.QApplication(sys.argv)
     Form = QtWidgets.QWidget()
-    ui = Search()
-    ui.connect_to_db()
-    ui.init_ui(Form)
-    #ui.load_all_data()
-    ui.load_data(18)
+    ui = ReaderView()
+    db_connection = Database.connect_to_db()
+    ui.connection = db_connection
+    ui.setupUi(Form)
+    ui.load_all_data()
     Form.show()
     sys.exit(app.exec_())
