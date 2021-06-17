@@ -1,24 +1,23 @@
 import sys
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtWidgets import QHeaderView, QMessageBox, QPushButton, QAbstractButton, QCalendarWidget, QWidget
+from PyQt5.QtWidgets import QHeaderView, QMessageBox, QCalendarWidget, QWidget
 import pandas as pd
 from datetime import datetime
 
-from PyQt5.uic.properties import QtGui
-
 from database.db_connection import Database
-from reader.pandas_model import pandasModel
+from pandas_model.pandas_model import pandasModel
 
 
 class ReaderView(QWidget):
     connection = None
     res_df = None
     res_title = None
-    ticket_id = 1499
+    ticket_id = None
 
-    def __init__(self):
+    def __init__(self, ticket_id):
         super().__init__()
         self.connection = Database.connect_to_db()
+        self.ticket_id = ticket_id
         self.setupUi(self)
         self.load_all_data()
 
@@ -89,11 +88,11 @@ class ReaderView(QWidget):
     def check_copy(self, title):
         query = """SELECT copy.inven_id
                     FROM copy INNER JOIN book ON copy.isbn = book.isbn 
-                    WHERE book.title = '%s' AND NOT EXISTS 
+                    WHERE book.title = '%s' AND EXISTS 
 
                     (SELECT inven_id 
                     FROM reader_copy
-                    WHERE copy.inven_id = inven_id);""" % title
+                    WHERE copy.inven_id = inven_id AND expected_return_date < CURDATE() AND actual_return_date IS NOT NULL);""" % title
         res = self.connection.connect().execute(query)
         copies = [list(i) for i in res]
         return [copies[i][0] for i in range(0, len(copies))]

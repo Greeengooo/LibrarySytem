@@ -2,6 +2,7 @@ import base64
 
 
 class LoginController():
+    user_ticket_id = None
 
     @staticmethod
     def checkUser(connection, username, password):
@@ -26,4 +27,12 @@ class LoginController():
         elif user_admin_biblio[0][0] == 'Бібліотекар':
             return 'biblio'
 
+    @staticmethod
+    def get_ticket_id(connection, username):
+        query = """SELECT ticket_id
+                        FROM reader 
+                        WHERE log_email='%s';""" % username
+        res = connection.connect().execute(query)
+        ticket_id = [list(i) for i in res]
+        return ticket_id[0][0]
 
